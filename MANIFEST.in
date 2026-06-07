@@ -1,1 +1,12 @@
-recursive-include src/praxis/cpp *.cpp *.hpp *.h
+include README.md
+include pyproject.toml
+include setup.py
+include setup.cfg
+
+recursive-include src/licketysplit *.py
+recursive-include src/licketysplit *.cpp
+recursive-include src/licketysplit *.hpp
+recursive-include src/licketysplit *.h
+recursive-include src/licketysplit/cpp *.cpp
+recursive-include src/licketysplit/cpp *.hpp
+recursive-include src/licketysplit/cpp *.h
