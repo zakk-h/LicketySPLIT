@@ -2,12 +2,31 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle
+from matplotlib.colors import to_rgb
 
 from ._core import LicketySPLIT as _LicketySPLITCore
 from ._core import CacheMode
 from ._threshold_guessing import ThresholdGuessBinarizer
 
 __all__ = ["LicketySPLIT", "CacheMode", "ThresholdGuessBinarizer"]
+
+def _as_cache_mode(cache_mode):
+    if isinstance(cache_mode, str):
+        s = cache_mode.strip().lower().replace("-", "_").replace(" ", "_")
+
+        if s in {"fingerprint", "hash", "hash_fingerprint"}:
+            return CacheMode.HASH_FINGERPRINT
+
+        if s in {"bitvector", "bit_vector", "bits", "exact"}:
+            return CacheMode.BITVECTOR
+
+        raise ValueError(
+            "cache_mode must be one of "
+            "{'fingerprint', 'hash', 'hash_fingerprint', "
+            "'bitvector', 'bit_vector', 'bits', 'exact'}"
+        )
+
+    return cache_mode
 
 
 def _as_u8_X(X) -> np.ndarray:
@@ -62,17 +81,17 @@ class LicketySPLIT:
     def __init__(
         self,
         *,
-        cache_mode=CacheMode.HASH_FINGERPRINT,
+        cache_mode="fingerprint",
         cost_caching_enabled: bool = True,
     ):
         self._model = _LicketySPLITCore()
         self.objective_: float | None = None
 
-        self._model.set_cache_mode(cache_mode)
+        self._model.set_cache_mode(_as_cache_mode(cache_mode))
         self._model.set_cost_caching_enabled(bool(cost_caching_enabled))
 
-    def set_cache_mode(self, mode) -> "LicketySPLIT":
-        self._model.set_cache_mode(mode)
+    def set_cache_mode(self, mode="fingerprint") -> "LicketySPLIT":
+        self._model.set_cache_mode(_as_cache_mode(mode))
         return self
 
     def set_cost_caching_enabled(self, enabled: bool) -> "LicketySPLIT":
@@ -154,7 +173,21 @@ class LicketySPLIT:
         paths, actions = self._model.leaf_paths_and_actions_single_tree()
         return paths, actions
 
-    def plot_tree(self, feature_names=None, figsize=(10, 6), ax=None, title=None, show=True):
+    def plot_tree(
+        self,
+        feature_names=None,
+        figsize=(14, 9),
+        ax=None,
+        title=None,
+        show=True,
+        class_color_low="#dbeafe",
+        class_color_high="#fecaca", 
+        split_node_color="#e5e7eb",
+        edge_color="black",
+        node_scale=1.35,
+        x_scale=5.8,
+        y_scale=4.3,
+    ):
         paths, actions = self.get_tree_paths()
 
         class Node:
@@ -224,6 +257,19 @@ class LicketySPLIT:
             uy = dy / dist
             return (x1 + ux * r1, y1 + uy * r1, x2 - ux * r2, y2 - uy * r2)
 
+        def _lerp_color(c1, c2, t):
+            a = np.array(to_rgb(c1), dtype=float)
+            b = np.array(to_rgb(c2), dtype=float)
+            out = (1.0 - t) * a + t * b
+            return tuple(out)
+
+        def _class_color(action, n_classes):
+            if n_classes <= 1:
+                return class_color_low
+            t = float(action) / float(n_classes - 1)
+            t = max(0.0, min(1.0, t))
+            return _lerp_color(class_color_low, class_color_high, t)
+
         if feature_names is None:
             enc = [abs(v) for p in paths for v in p]
             max_f = (max(enc) - 1) if enc else -1
@@ -231,9 +277,6 @@ class LicketySPLIT:
 
         root = build_tree_from_paths(paths, actions)
         pos_local, _ = assign_positions_tree(root)
-
-        x_scale = 4.6
-        y_scale = 3.4
 
         pos = {}
         xs = []
@@ -256,18 +299,26 @@ class LicketySPLIT:
             ys = [p[1] for p in all_nodes_xy] if all_nodes_xy else [0.0]
             total_w = (max(xs) - min(xs)) if xs else 10.0
             total_h = (max(ys) - min(ys)) if ys else 6.0
-            fig_w = max(figsize[0], total_w / 2.2)
-            fig_h = max(figsize[1], total_h / 1.6)
-            fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=140)
+            fig_w = max(figsize[0], total_w / 2.0)
+            fig_h = max(figsize[1], total_h / 1.45)
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=150)
         else:
             fig = ax.figure
 
         ax.set_axis_off()
 
-        internal_r = 0.46
-        leaf_r = 0.56
-        SPLIT_FS = 16
-        SPLIT_OFFSET_PTS = 12
+        internal_r = 0.62 * node_scale
+        leaf_r = 0.76 * node_scale
+        edge_lw = 2.8 * node_scale
+
+        SPLIT_FS = int(17 * node_scale)
+        LEAF_FS = int(18 * node_scale)
+        TITLE_FS = int(20 * node_scale)
+        SPLIT_OFFSET_PTS = 16
+
+        n_classes = 1
+        if actions:
+            n_classes = max(int(a) for a in actions) + 1
 
         def _feat_name(f: int) -> str:
             if feature_names is not None and f < len(feature_names):
@@ -282,20 +333,26 @@ class LicketySPLIT:
                     x2, y2 = pos[node.left]
                     r_child = leaf_r if node.left.action is not None else internal_r
                     sx, sy, ex, ey = _shrink_segment(x, y, x2, y2, internal_r, r_child)
-                    ax.add_line(Line2D([sx, ex], [sy, ey], color="black", linewidth=2.2, zorder=1))
+                    ax.add_line(Line2D([sx, ex], [sy, ey], color=edge_color, linewidth=edge_lw, zorder=1))
                     draw(node.left)
 
                 if node.right is not None:
                     x2, y2 = pos[node.right]
                     r_child = leaf_r if node.right.action is not None else internal_r
                     sx, sy, ex, ey = _shrink_segment(x, y, x2, y2, internal_r, r_child)
-                    ax.add_line(Line2D([sx, ex], [sy, ey], color="black", linewidth=2.2, zorder=1))
+                    ax.add_line(Line2D([sx, ex], [sy, ey], color=edge_color, linewidth=edge_lw, zorder=1))
                     draw(node.right)
 
             if node.action is None:
-                face = "#ddeeff"
                 radius = internal_r
-                circ = Circle((x, y), radius, facecolor=face, edgecolor="black", linewidth=1.6, zorder=10)
+                circ = Circle(
+                    (x, y),
+                    radius,
+                    facecolor=split_node_color,
+                    edgecolor=edge_color,
+                    linewidth=1.9,
+                    zorder=10,
+                )
                 ax.add_patch(circ)
 
                 if node.feature is not None:
@@ -309,15 +366,23 @@ class LicketySPLIT:
                         ha="center",
                         va="bottom",
                         fontsize=SPLIT_FS,
-                        bbox=dict(boxstyle="round,pad=0.20", fc="white", ec="none", alpha=0.98),
+                        fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.98),
                         zorder=10000,
                         clip_on=False,
                     )
             else:
-                face = "#e0ffd8"
+                face = _class_color(int(node.action), n_classes)
                 label = str(int(node.action))
 
-                circ = Circle((x, y), leaf_r, facecolor=face, edgecolor="black", linewidth=1.6, zorder=10)
+                circ = Circle(
+                    (x, y),
+                    leaf_r,
+                    facecolor=face,
+                    edgecolor=edge_color,
+                    linewidth=1.9,
+                    zorder=10,
+                )
                 ax.add_patch(circ)
                 ax.text(
                     x,
@@ -325,7 +390,7 @@ class LicketySPLIT:
                     label,
                     ha="center",
                     va="center",
-                    fontsize=18,
+                    fontsize=LEAF_FS,
                     fontweight="bold",
                     zorder=10000,
                     clip_on=False,
@@ -336,19 +401,21 @@ class LicketySPLIT:
         all_xy = list(pos.values())
         xs, ys = zip(*all_xy) if all_xy else ([0.0], [0.0])
 
-        pad_x = 3.0
-        pad_y = 4.0
+        pad_x = 4.0 * node_scale
+        pad_y = 4.5 * node_scale
         ax.set_xlim(min(xs) - pad_x, max(xs) + pad_x)
         ax.set_ylim(min(ys) - pad_y, max(ys) + pad_y)
-        ax.margins(x=0.08, y=0.12)
+        ax.margins(x=0.10, y=0.14)
 
         for t in ax.texts:
             t.set_clip_on(False)
 
         ax.set_aspect("equal", adjustable="box")
-        ax.set_axis_off()
-        ax.set_title("LicketySPLIT Tree" if title is None else str(title), fontsize=16, pad=12)
+
+        if title is not None:
+            ax.set_title(title, fontsize=TITLE_FS, pad=18)
 
         if show:
             plt.show()
-        return fig, ax
+
+        return ax
