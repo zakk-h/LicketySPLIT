@@ -1,9 +1,5 @@
 # LicketySPLIT
 
-Near-optimal decision tree learning via LicketySPLIT.
-
-# LicketySPLIT
-
 LicketySPLIT is a Python package with a C++ backend for learning sparse decision trees for classification. It builds on the LicketySPLIT algorithm from [Near Optimal Decision Trees in a SPLIT Second](https://arxiv.org/abs/2502.15988) and generalizes it with recursive pilot ideas as in [From Rashomon Theory to PRAXIS: Efficient Decision Tree Rashomon Sets](https://arxiv.org/abs/2606.00202).
 
 The package supports binary and multi-class classification, optional sample weights, efficient subproblem caching, and threshold-based binarization for continuous features.
