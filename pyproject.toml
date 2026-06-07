@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "pybind11>=2.13", "numpy>=1.23"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "licketysplit"
+version = "0.0.9"
+description = "Near-optimal decision trees via LicketySPLIT"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  { name = "Varun Babbar" },
+  { name = "Hayden McTavish" },
+  { name = "Zakk Heile" },
+  { name = "Margo Seltzer" },
+  { name = "Cynthia Rudin" }
+]
+dependencies = [
+  "numpy>=1.23",
+  "matplotlib>=3.6",
+  "scikit-learn>=1.1",
+  "pandas>=1.5"
+]
+
+[project.urls]
+Homepage = "https://arxiv.org/pdf/2502.15988"
