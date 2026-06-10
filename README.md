@@ -1,6 +1,7 @@
 # LicketySPLIT
 
-LicketySPLIT is a Python package with a C++ backend for learning sparse decision trees for classification. It builds on the LicketySPLIT algorithm from [Near Optimal Decision Trees in a SPLIT Second](https://arxiv.org/abs/2502.15988) and generalizes it with recursive pilot ideas as in [From Rashomon Theory to PRAXIS: Efficient Decision Tree Rashomon Sets](https://arxiv.org/abs/2606.00202).
+LicketySPLIT is a Python package with a C++ backend for learning sparse decision trees for classification. It builds on the LicketySPLIT algorithm from [Near Optimal Decision Trees in a SPLIT Second](https://arxiv.org/abs/2502.15988) and generalizes it with recursive pilot ideas as in [From Rashomon Theory to PRAXIS: Efficient Decision Tree Rashomon Sets](https://arxiv.org/abs/2606.00202). For continuous features, we recommend the included binarization techniques from [*Fast Sparse Decision Tree Optimization via Reference Ensembles*](https://arxiv.org/abs/2112.00798), which preserve optimality with respect to a gradient-boosted tree ensemble.
+
 
 The package supports binary and multi-class classification, optional sample weights, efficient subproblem caching, and threshold-based binarization for continuous features.
 
@@ -35,7 +36,7 @@ Labels should be encoded as contiguous nonnegative integers:
 
 ## Features
 
-LicketySPLIT expects binary input features. For continuous data, use `ThresholdGuessBinarizer` to generate binary threshold features.
+LicketySPLIT expects binary input features. For continuous data, use `ThresholdGuessBinarizer` (included from https://arxiv.org/abs/2112.00798) to generate binary threshold features.
 
 ```python
 from licketysplit import ThresholdGuessBinarizer
@@ -94,3 +95,8 @@ This package builds on the LicketySPLIT algorithm from:
 and generalizes it with a pilot algorithm approach as in:
 
 [From Rashomon Theory to PRAXIS: Efficient Decision Tree Rashomon Sets](https://arxiv.org/abs/2606.00202)
+
+For continuous-feature binarization, we recommend:
+
+[*Fast Sparse Decision Tree Optimization via Reference Ensembles*](https://arxiv.org/abs/2112.00798)
+
