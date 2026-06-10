@@ -36,7 +36,7 @@ Labels should be encoded as contiguous nonnegative integers:
 
 ## Features
 
-LicketySPLIT expects binary input features. For continuous data, use `ThresholdGuessBinarizer` (included from https://arxiv.org/abs/2112.00798) to generate binary threshold features.
+LicketySPLIT expects binary input features. For continuous data, use the included `ThresholdGuessBinarizer` to generate binary threshold features.
 
 ```python
 from licketysplit import ThresholdGuessBinarizer
