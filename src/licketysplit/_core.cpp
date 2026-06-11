@@ -182,6 +182,7 @@ PYBIND11_MODULE(_core, m) {
                double lambda_leaf,
                double eta_defer,
                int depth_budget,
+               int lookahead_k,
                py::object sample_weights_obj)
             {
                 py::buffer_info xinfo = X.request();
@@ -203,6 +204,9 @@ PYBIND11_MODULE(_core, m) {
 
                 if (depth_budget < -128 || depth_budget > 127) {
                     throw std::runtime_error("depth_budget out of int8 range [-128,127]");
+                }
+                if (lookahead_k < 1 || lookahead_k > 127) {
+                    throw std::runtime_error("lookahead_k out of int8 range [1,127]");
                 }
 
                 auto X_row_major = numpy_to_rowmajor_u8(X);
@@ -230,6 +234,7 @@ PYBIND11_MODULE(_core, m) {
                     lambda_leaf,
                     eta_defer,
                     (int8_t)depth_budget,
+                    (int8_t)lookahead_k,
                     weights_vec
                 );
 
@@ -241,6 +246,7 @@ PYBIND11_MODULE(_core, m) {
             py::arg("lambda_leaf"),
             py::arg("eta_defer"),
             py::arg("depth_budget"),
+            py::arg("lookahead_k") = 1,
             py::arg("sample_weights") = py::none()
         )
 
@@ -399,6 +405,59 @@ PYBIND11_MODULE(_core, m) {
             "regression_leaf_paths_and_values_single_tree",
             [](const LicketySPLIT& self) {
                 return self.regression_leaf_paths_and_values_single_tree();
+            }
+        )
+
+        .def(
+            "regression_leaf_counts_single_tree",
+            [](const LicketySPLIT& self) {
+                auto c = self.regression_leaf_counts_single_tree();
+
+                py::dict d;
+                d["predict"] = c.predict;
+                d["defer"] = c.defer;
+                d["total"] = c.total();
+
+                return d;
+            }
+        )
+
+        .def(
+            "regression_leaf_paths_single_tree",
+            [](const LicketySPLIT& self) {
+                return self.regression_leaf_paths_single_tree();
+            }
+        )
+
+        .def(
+            "regression_leaf_values_single_tree",
+            [](const LicketySPLIT& self) {
+                return self.regression_leaf_values_single_tree();
+            }
+        )
+
+        .def(
+            "regression_split_counts_single_tree",
+            [](const LicketySPLIT& self,
+               py::array_t<uint8_t, py::array::c_style | py::array::forcecast> X)
+            {
+                py::buffer_info xinfo = X.request();
+                if (xinfo.ndim != 2) {
+                    throw std::runtime_error("X must be 2D (n_samples, n_features)");
+                }
+
+                auto X_row_major = numpy_to_rowmajor_u8(X);
+                auto counts = self.regression_split_counts_single_tree(X_row_major);
+
+                return vec_i32_to_numpy(counts);
+            },
+            py::arg("X")
+        )
+
+        .def(
+            "regression_leaf_actions_single_tree",
+            [](const LicketySPLIT& self) {
+                return self.regression_leaf_actions_single_tree();
             }
         );
 }

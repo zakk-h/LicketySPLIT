@@ -238,7 +238,8 @@ public:
             }
         }
 
-        lamN = lambda_leaf * total_weight_;
+        const double root_tss = [&](){ double sy = 0.0, sy2 = 0.0; for (int i = 0; i < n_samples; ++i) { const double w = uniform_weights_fast_ ? uniform_weight_ : sample_weights_[(size_t)i]; sy += w * y[(size_t)i]; sy2 += w * y[(size_t)i] * y[(size_t)i]; } return std::max(0.0, sy2 - sy * sy / std::max(1e-12, total_weight_)); }();
+        lamN = lambda_leaf * root_tss;
         eta = eta_defer;
         depth_trained = depth_budget;
         k_trained     = lookahead_k;
@@ -344,6 +345,34 @@ public:
         return out;
     }
 
+    vector<int> regression_split_counts_single_tree(
+        const vector<vector<uint8_t>>& X_row_major
+    ) const {
+        if (!reg_root_node) {
+            throw runtime_error("regression_split_counts_single_tree: Regression model not fit.");
+        }
+
+        const size_t N = X_row_major.size();
+        if (N == 0) return {};
+
+        if ((int)X_row_major[0].size() != n_features) {
+            throw runtime_error("regression_split_counts_single_tree: feature count mismatch.");
+        }
+
+        for (size_t i = 0; i < N; ++i) {
+            if ((int)X_row_major[i].size() != n_features) {
+                throw runtime_error("regression_split_counts_single_tree: inconsistent row lengths in X.");
+            }
+        }
+
+        vector<int> out(N, 0);
+        for (size_t i = 0; i < N; ++i) {
+            out[i] = regression_split_count_one_(reg_root_node.get(), X_row_major[i]);
+        }
+
+        return out;
+    }
+
     std::vector<std::vector<int>> leaf_paths_single_tree() const {
         std::vector<std::vector<int>> paths;
         if (!root_node) return paths;
@@ -370,6 +399,62 @@ public:
         return {paths, actions};
     }
 
+    struct RegressionLeafCounts {
+        int predict = 0;
+        int defer = 0;
+
+        int total() const {
+            return predict + defer;
+        }
+    };
+
+    RegressionLeafCounts regression_leaf_counts_single_tree() const {
+        RegressionLeafCounts c;
+        if (!reg_root_node) return c;
+        count_regression_leaves_rec_(reg_root_node.get(), c);
+        return c;
+    }
+
+    std::vector<std::vector<int>> regression_leaf_paths_single_tree() const {
+        std::vector<std::vector<int>> paths;
+        if (!reg_root_node) return paths;
+
+        std::vector<int> cur;
+        std::vector<double> dummy_values;
+        collect_regression_leaf_paths_and_values_rec_(
+            reg_root_node.get(),
+            cur,
+            paths,
+            dummy_values
+        );
+
+        return paths;
+    }
+
+    std::vector<double> regression_leaf_values_single_tree() const {
+        std::vector<std::vector<int>> dummy_paths;
+        std::vector<double> values;
+        if (!reg_root_node) return values;
+
+        std::vector<int> cur;
+        collect_regression_leaf_paths_and_values_rec_(
+            reg_root_node.get(),
+            cur,
+            dummy_paths,
+            values
+        );
+
+        return values;
+    }
+
+    std::vector<int> regression_leaf_actions_single_tree() const {
+        std::vector<int> actions;
+        if (!reg_root_node) return actions;
+
+        collect_regression_leaf_actions_rec_(reg_root_node.get(), actions);
+        return actions;
+    }
+
     void fit_regression(
         const vector<vector<uint8_t>>& X_row_major,
         const vector<double>& y,
@@ -379,6 +464,28 @@ public:
         int8_t depth_budget,
         const vector<double>& sample_weights = {}
     ) {
+        fit_regression(
+            X_row_major,
+            y,
+            bb_pred,
+            lambda_leaf,
+            eta_defer,
+            depth_budget,
+            (int8_t)1,
+            sample_weights
+        );
+    }
+
+    void fit_regression(
+        const vector<vector<uint8_t>>& X_row_major,
+        const vector<double>& y,
+        const vector<double>& bb_pred,
+        double lambda_leaf,
+        double eta_defer,
+        int8_t depth_budget,
+        int8_t lookahead_k,
+        const vector<double>& sample_weights
+    ) {
         if (X_row_major.empty()) throw runtime_error("fit_regression: X has 0 rows.");
         if (X_row_major[0].empty()) throw runtime_error("fit_regression: X has 0 features.");
         if (y.empty()) throw runtime_error("fit_regression: y is empty.");
@@ -386,6 +493,8 @@ public:
             throw runtime_error("fit_regression: X and y size mismatch.");
         if ((int)bb_pred.size() != (int)y.size())
             throw runtime_error("fit_regression: bb_pred and y size mismatch.");
+        if (lookahead_k < 1)
+            throw runtime_error("fit_regression: lookahead_k must be >= 1.");
         if (!sample_weights.empty() && (int)sample_weights.size() != (int)y.size())
             throw runtime_error("fit_regression: sample_weights and y size mismatch.");
 
@@ -434,7 +543,7 @@ public:
         lamN = lambda_leaf * total_weight_;
         eta = eta_defer;
         depth_trained = depth_budget;
-        k_trained = 1;
+        k_trained = lookahead_k;
 
         y_reg_ = y;
         bb_reg_ = bb_pred;
@@ -457,7 +566,7 @@ public:
         root.w[(size_t)(n_words - 1)] = tail_mask;
 
         double obj = 0.0;
-        reg_root_node = build_regression_tree_(root, depth_budget, obj);
+        reg_root_node = build_regression_lickety_tree_(root, depth_budget, lookahead_k, obj);
         last_objective_ = obj;
     }
 
@@ -521,10 +630,12 @@ public:
             values
         );
 
-    return {paths, values};
+        return {paths, values};
     }
 
 private:
+    struct RegNode;
+
     struct Node {
         int feature = -1;
         LeafKind kind = LeafKind::PREDICT;
@@ -1405,6 +1516,22 @@ private:
         return s;
     }
 
+    static int regression_split_count_one_(
+        const RegNode* node,
+        const vector<uint8_t>& xrow
+    ) {
+        int s = 0;
+        const RegNode* cur = node;
+
+        while (cur && cur->feature >= 0) {
+            const int f = cur->feature;
+            ++s;
+            cur = (xrow[(size_t)f] & 1) ? cur->left.get() : cur->right.get();
+        }
+
+        return s;
+    }
+
     static void collect_leaf_paths_rec_(
         const Node* node,
         std::vector<int>& cur,
@@ -1553,12 +1680,16 @@ private:
         return n;
     }
 
-    int find_best_split_regression_(const Packed& mask) const {
+    double regression_leaf_sse_only_(const Packed& mask) const {
+        return regression_sse_from_stats_(regression_stats_mask_(mask));
+    }
+
+    int find_best_split_regression_greedy_(const Packed& mask) const {
         const int D_count = mask.count();
         if (D_count <= 1) return -1;
 
         int best_f = -1;
-        double best_cost = std::numeric_limits<double>::infinity();
+        double best_sse = std::numeric_limits<double>::infinity();
 
         Packed L((size_t)n_words), R((size_t)n_words);
 
@@ -1568,12 +1699,12 @@ private:
 
             if (left_n == 0 || left_n == D_count) continue;
 
-            const double split_cost =
-                best_regression_leaf_option_(L).cost
-                + best_regression_leaf_option_(R).cost;
+            const double split_sse =
+                regression_leaf_sse_only_(L)
+                + regression_leaf_sse_only_(R);
 
-            if (split_cost < best_cost) {
-                best_cost = split_cost;
+            if (split_sse < best_sse) {
+                best_sse = split_sse;
                 best_f = f;
             }
         }
@@ -1581,9 +1712,44 @@ private:
         return best_f;
     }
 
+    double regression_depth1_optimal_cost_(const Packed& mask) const {
+        constexpr int8_t DEPTH = 1;
+
+        double cached = 0.0;
+        if (try_get_greedy_cached_(mask, DEPTH, cached)) return cached;
+
+        const BestRegLeaf leaf = best_regression_leaf_option_(mask);
+        double ans = leaf.cost;
+
+        const int D_count = mask.count();
+        if (D_count > 1) {
+            Packed L((size_t)n_words), R((size_t)n_words);
+
+            for (int f = 0; f < n_features; ++f) {
+                int left_n = 0;
+                split_bits_count_left(mask, X_bits[(size_t)f], L, R, left_n);
+
+                if (left_n == 0 || left_n == D_count) continue;
+
+                const double split_cost =
+                    best_regression_leaf_option_(L).cost
+                    + best_regression_leaf_option_(R).cost;
+
+                if (split_cost < ans) ans = split_cost;
+            }
+        }
+
+        put_greedy_cached_(mask, DEPTH, ans);
+        return ans;
+    }
+
     double regression_greedy_cost_(const Packed& mask, int8_t depth) const {
         if (depth <= 0) {
             return best_regression_leaf_option_(mask).cost;
+        }
+
+        if (depth == 1) {
+            return regression_depth1_optimal_cost_(mask);
         }
 
         double cached = 0.0;
@@ -1593,42 +1759,93 @@ private:
         double ans = leaf.cost;
 
         const int D_count = mask.count();
-
         if (D_count > 1) {
-            Packed L((size_t)n_words), R((size_t)n_words);
+            const int best_f = find_best_split_regression_greedy_(mask);
 
-            if (depth == 1) {
-                for (int f = 0; f < n_features; ++f) {
-                    int left_n = 0;
-                    split_bits_count_left(mask, X_bits[(size_t)f], L, R, left_n);
+            if (best_f >= 0) {
+                Packed L((size_t)n_words), R((size_t)n_words);
+                int left_n = 0;
+                split_bits_count_left(mask, X_bits[(size_t)best_f], L, R, left_n);
 
-                    if (left_n == 0 || left_n == D_count) continue;
-
+                if (left_n > 0 && left_n < D_count) {
                     const double split_cost =
-                        best_regression_leaf_option_(L).cost
-                        + best_regression_leaf_option_(R).cost;
+                        regression_greedy_cost_(L, (int8_t)(depth - 1))
+                        + regression_greedy_cost_(R, (int8_t)(depth - 1));
 
                     if (split_cost < ans) ans = split_cost;
-                }
-            } else {
-                const int best_f = find_best_split_regression_(mask);
-
-                if (best_f >= 0) {
-                    int left_n = 0;
-                    split_bits_count_left(mask, X_bits[(size_t)best_f], L, R, left_n);
-
-                    if (left_n > 0 && left_n < D_count) {
-                        const double split_cost =
-                            regression_greedy_cost_(L, (int8_t)(depth - 1))
-                            + regression_greedy_cost_(R, (int8_t)(depth - 1));
-
-                        if (split_cost < ans) ans = split_cost;
-                    }
                 }
             }
         }
 
         put_greedy_cached_(mask, depth, ans);
+        return ans;
+    }
+
+    double regression_lickety_cost_(const Packed& mask, int8_t depth, int8_t k) const {
+        if (depth <= 0) {
+            return best_regression_leaf_option_(mask).cost;
+        }
+
+        if (k > depth - 1) {
+            k = (int8_t)(depth - 1);
+        }
+
+        if (depth == 1) {
+            return regression_depth1_optimal_cost_(mask);
+        }
+
+        double cached = 0.0;
+        if (try_get_lickety_cached_(mask, depth, k, cached)) return cached;
+
+        const BestRegLeaf leaf = best_regression_leaf_option_(mask);
+        double ans = leaf.cost;
+
+        const int D_count = mask.count();
+        if (D_count > 1) {
+            int best_feat = -1;
+            double best_proxy_children = std::numeric_limits<double>::infinity();
+
+            Packed L((size_t)n_words), R((size_t)n_words);
+
+            for (int f = 0; f < n_features; ++f) {
+                int left_n = 0;
+                split_bits_count_left(mask, X_bits[(size_t)f], L, R, left_n);
+
+                if (left_n == 0 || left_n == D_count) continue;
+
+                double proxy_children = 0.0;
+                if (k <= 1) {
+                    proxy_children =
+                        regression_greedy_cost_(L, (int8_t)(depth - 1))
+                        + regression_greedy_cost_(R, (int8_t)(depth - 1));
+                } else {
+                    const int8_t km1 = (int8_t)(k - 1);
+                    proxy_children =
+                        regression_lickety_cost_(L, (int8_t)(depth - 1), km1)
+                        + regression_lickety_cost_(R, (int8_t)(depth - 1), km1);
+                }
+
+                if (proxy_children < best_proxy_children) {
+                    best_proxy_children = proxy_children;
+                    best_feat = f;
+                }
+            }
+
+            if (best_feat >= 0) {
+                int left_n = 0;
+                split_bits_count_left(mask, X_bits[(size_t)best_feat], L, R, left_n);
+
+                if (left_n > 0 && left_n < D_count) {
+                    const double split_cost =
+                        regression_lickety_cost_(L, (int8_t)(depth - 1), k)
+                        + regression_lickety_cost_(R, (int8_t)(depth - 1), k);
+
+                    if (split_cost < ans) ans = split_cost;
+                }
+            }
+        }
+
+        put_lickety_cached_(mask, depth, k, ans);
         return ans;
     }
 
@@ -1683,7 +1900,7 @@ private:
         return n;
     }
 
-    shared_ptr<RegNode> build_regression_tree_(
+    shared_ptr<RegNode> build_regression_greedy_tree_(
         const Packed& mask,
         int8_t depth,
         double& out_cost
@@ -1696,7 +1913,6 @@ private:
         }
 
         const int D_count = mask.count();
-
         if (D_count <= 1) {
             out_cost = leaf.cost;
             return make_regression_leaf_(leaf);
@@ -1706,7 +1922,7 @@ private:
             return build_regression_depth1_tree_(mask, out_cost);
         }
 
-        const int best_f = find_best_split_regression_(mask);
+        const int best_f = find_best_split_regression_greedy_(mask);
 
         if (best_f < 0) {
             out_cost = leaf.cost;
@@ -1726,10 +1942,10 @@ private:
         double right_cost = 0.0;
 
         auto left_node =
-            build_regression_tree_(L, (int8_t)(depth - 1), left_cost);
+            build_regression_greedy_tree_(L, (int8_t)(depth - 1), left_cost);
 
         auto right_node =
-            build_regression_tree_(R, (int8_t)(depth - 1), right_cost);
+            build_regression_greedy_tree_(R, (int8_t)(depth - 1), right_cost);
 
         const double split_cost = left_cost + right_cost;
 
@@ -1742,6 +1958,95 @@ private:
 
         auto n = make_shared<RegNode>();
         n->feature = best_f;
+        n->left = left_node;
+        n->right = right_node;
+        return n;
+    }
+
+    shared_ptr<RegNode> build_regression_lickety_tree_(
+        const Packed& mask,
+        int8_t depth,
+        int8_t k,
+        double& out_cost
+    ) const {
+        const BestRegLeaf leaf = best_regression_leaf_option_(mask);
+
+        if (depth <= 0) {
+            out_cost = leaf.cost;
+            return make_regression_leaf_(leaf);
+        }
+
+        const int D_count = mask.count();
+        if (D_count <= 1) {
+            out_cost = leaf.cost;
+            return make_regression_leaf_(leaf);
+        }
+
+        if (depth == 1) {
+            return build_regression_depth1_tree_(mask, out_cost);
+        }
+
+        if (k > depth - 1) {
+            k = (int8_t)(depth - 1);
+        }
+
+        int best_feat = -1;
+        double best_proxy_children = std::numeric_limits<double>::infinity();
+
+        Packed bestL((size_t)n_words), bestR((size_t)n_words);
+        Packed L((size_t)n_words), R((size_t)n_words);
+
+        for (int f = 0; f < n_features; ++f) {
+            int left_n = 0;
+            split_bits_count_left(mask, X_bits[(size_t)f], L, R, left_n);
+
+            if (left_n == 0 || left_n == D_count) continue;
+
+            double proxy_children = 0.0;
+            if (k <= 1) {
+                proxy_children =
+                    regression_greedy_cost_(L, (int8_t)(depth - 1))
+                    + regression_greedy_cost_(R, (int8_t)(depth - 1));
+            } else {
+                const int8_t km1 = (int8_t)(k - 1);
+                proxy_children =
+                    regression_lickety_cost_(L, (int8_t)(depth - 1), km1)
+                    + regression_lickety_cost_(R, (int8_t)(depth - 1), km1);
+            }
+
+            if (proxy_children < best_proxy_children) {
+                best_proxy_children = proxy_children;
+                best_feat = f;
+                bestL.w = L.w;
+                bestR.w = R.w;
+            }
+        }
+
+        if (best_feat < 0) {
+            out_cost = leaf.cost;
+            return make_regression_leaf_(leaf);
+        }
+
+        double left_cost = 0.0;
+        double right_cost = 0.0;
+
+        auto left_node =
+            build_regression_lickety_tree_(bestL, (int8_t)(depth - 1), k, left_cost);
+
+        auto right_node =
+            build_regression_lickety_tree_(bestR, (int8_t)(depth - 1), k, right_cost);
+
+        const double split_cost = left_cost + right_cost;
+
+        if (leaf.cost <= split_cost) {
+            out_cost = leaf.cost;
+            return make_regression_leaf_(leaf);
+        }
+
+        out_cost = split_cost;
+
+        auto n = make_shared<RegNode>();
+        n->feature = best_feat;
         n->left = left_node;
         n->right = right_node;
         return n;
@@ -1810,6 +2115,40 @@ private:
                 placeholder
             );
         }
+    }
+
+    static void count_regression_leaves_rec_(
+        const RegNode* node,
+        RegressionLeafCounts& c
+    ) {
+        if (!node) return;
+
+        if (node->feature < 0) {
+            if (node->kind == LeafKind::DEFER) {
+                c.defer += 1;
+            } else {
+                c.predict += 1;
+            }
+            return;
+        }
+
+        count_regression_leaves_rec_(node->left.get(), c);
+        count_regression_leaves_rec_(node->right.get(), c);
+    }
+
+    static void collect_regression_leaf_actions_rec_(
+        const RegNode* node,
+        std::vector<int>& actions_out
+    ) {
+        if (!node) return;
+
+        if (node->feature < 0) {
+            actions_out.push_back(node->kind == LeafKind::DEFER ? -1 : 0);
+            return;
+        }
+
+        collect_regression_leaf_actions_rec_(node->left.get(), actions_out);
+        collect_regression_leaf_actions_rec_(node->right.get(), actions_out);
     }
 
     static void collect_regression_leaf_paths_and_values_rec_(

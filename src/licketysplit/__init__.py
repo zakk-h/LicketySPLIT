@@ -542,12 +542,14 @@ class LicketySPLITRegressor(_BaseLicketySPLIT, RegressorMixin):
         *,
         lambda_leaf: float = 0.01,
         depth_budget: int = 3,
+        lookahead_k: int = 1,
         eta_defer=None,
         cache_mode="fingerprint",
         cost_caching_enabled: bool = True,
     ):
         self.lambda_leaf = lambda_leaf
         self.depth_budget = depth_budget
+        self.lookahead_k = lookahead_k
         self.eta_defer = eta_defer
         self.cache_mode = cache_mode
         self.cost_caching_enabled = cost_caching_enabled
@@ -588,6 +590,7 @@ class LicketySPLITRegressor(_BaseLicketySPLIT, RegressorMixin):
             float(self.lambda_leaf),
             float(eta_arg),
             int(self.depth_budget),
+            int(self.lookahead_k),
             weights_arg,
         )
 
@@ -647,7 +650,29 @@ class LicketySPLITRegressor(_BaseLicketySPLIT, RegressorMixin):
 
         return float(1.0 - np.sum(w * (y - pred) ** 2) / denom)
 
+    def leaf_counts(self) -> dict:
+        if not hasattr(self, "_model"):
+            raise RuntimeError("Model has not been fit.")
+        return dict(self._model.regression_leaf_counts_single_tree())
+
+    def leaf_paths(self) -> list[list[int]]:
+        if not hasattr(self, "_model"):
+            raise RuntimeError("Model has not been fit.")
+        return list(self._model.regression_leaf_paths_single_tree())
+
+    def leaf_values(self) -> list[float]:
+        if not hasattr(self, "_model"):
+            raise RuntimeError("Model has not been fit.")
+        return list(self._model.regression_leaf_values_single_tree())
+
+    def leaf_actions(self) -> list[int]:
+        if not hasattr(self, "_model"):
+            raise RuntimeError("Model has not been fit.")
+        return list(self._model.regression_leaf_actions_single_tree())
+
     def get_tree_paths(self):
+        if not hasattr(self, "_model"):
+            raise RuntimeError("Model has not been fit.")
         paths, values = self._model.regression_leaf_paths_and_values_single_tree()
         return paths, values
 
@@ -657,36 +682,10 @@ class LicketySPLITRegressor(_BaseLicketySPLIT, RegressorMixin):
         if not hasattr(self, "_model"):
             raise RuntimeError("Model has not been fit.")
 
-        paths, values = self.get_tree_paths()
-
-        out = np.zeros(X.shape[0], dtype=np.int32)
-
-        for i in range(X.shape[0]):
-            best_len = None
-
-            for path in paths:
-                ok = True
-
-                for signed_f in path:
-                    f = abs(int(signed_f)) - 1
-                    go_left = signed_f > 0
-
-                    x_true = bool(X[i, f] & 1)
-
-                    if go_left != x_true:
-                        ok = False
-                        break
-
-                if ok:
-                    best_len = len(path)
-                    break
-
-            if best_len is None:
-                raise RuntimeError("Could not match row to any regression leaf path.")
-
-            out[i] = best_len
-
-        return out
+        return np.asarray(
+            self._model.regression_split_counts_single_tree(X),
+            dtype=np.int32,
+        )
 
     def plot_tree(
         self,
