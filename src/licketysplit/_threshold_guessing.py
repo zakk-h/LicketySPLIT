@@ -3,13 +3,18 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils import check_X_y
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.utils.validation import check_array, check_is_fitted
+from sklearn.utils.multiclass import type_of_target
     
+
 class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
     """
     Encode numerical features as a one-hot numeric array. 
     The encoding is based on the thresholds found by a Gradient Boosting Classifier.
+
+    For regression, the encoding is based on the thresholds found by a Gradient
+    Boosting Regressor.
 
     For more information on the method used please refer to the following paper:
     "Fast Sparse Decision Tree Optimization via Reference Ensembles"
@@ -41,6 +46,11 @@ class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
         Whether to perform column elimination or not. If True, the algorithm will
         iteratively remove the least important feature until the score of the model
         decreases. This is done to reduce the number of features in the final model.
+
+    task : {"auto", "classification", "regression"}, default="auto"
+        Which type of Gradient Boosting model to use for threshold guessing.
+        If "auto", continuous targets use GradientBoostingRegressor and discrete
+        targets use GradientBoostingClassifier.
     
     Attributes
     ----------
@@ -98,14 +108,55 @@ class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
         n_estimators: int = 100,
         max_depth: int = 3,
         random_state: int = 0,
-        column_elimination: bool = True
-
+        column_elimination: bool = True,
+        task: str = "auto",
     ):
         self.learning_rate = learning_rate
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.random_state = random_state
         self.column_elimination = column_elimination
+        self.task = task
+
+    def _resolve_task(self, y):
+        task = str(self.task).strip().lower()
+
+        if task not in {"auto", "classification", "classifier", "regression", "regressor"}:
+            raise ValueError("task must be one of {'auto', 'classification', 'regression'}")
+
+        if task in {"classification", "classifier"}:
+            return "classification"
+
+        if task in {"regression", "regressor"}:
+            return "regression"
+
+        y_type = type_of_target(y)
+
+        if y_type in {"continuous", "continuous-multioutput"}:
+            return "regression"
+
+        if y_type in {"binary", "multiclass", "multiclass-multioutput", "multilabel-indicator"}:
+            return "classification"
+
+        raise ValueError(f"Could not infer task from target type {y_type!r}; pass task explicitly.")
+
+    def _make_gradient_boosting_model(self):
+        if self.task_ == "regression":
+            return GradientBoostingRegressor(
+                loss="squared_error",
+                learning_rate=self.learning_rate,
+                n_estimators=self.n_estimators,
+                max_depth=self.max_depth,
+                random_state=self.random_state,
+            )
+
+        return GradientBoostingClassifier(
+            loss='log_loss',
+            learning_rate=self.learning_rate,
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            random_state=self.random_state,
+        )
         
     def fit(self, X, y, columns=None, sample_weight=None):
         """
@@ -141,6 +192,8 @@ class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
         X, y = check_X_y(X, y, accept_sparse=False)
         _, m = X.shape
 
+        self.task_ = self._resolve_task(y)
+
         if sample_weight is not None:
             sample_weight = np.asarray(sample_weight, dtype=float)
             
@@ -152,11 +205,8 @@ class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
         self.n_features_in_ = m
 
         # Extract the thresholds from the model
-        clf = GradientBoostingClassifier(loss='log_loss',
-                                                learning_rate=self.learning_rate,
-                                                n_estimators=self.n_estimators,
-                                                max_depth=self.max_depth,
-                                                random_state=self.random_state)
+        clf = self._make_gradient_boosting_model()
+
         #clf.fit(X, y)
         clf.fit(X, y, sample_weight=sample_weight)
         thresholds = []
@@ -210,6 +260,9 @@ class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
         return self
     
     def __dedup_identical_columns(self, X_bin, thresholds):
+        if len(thresholds) == 0:
+            return X_bin, thresholds
+
         Xb = X_bin.astype(bool)
         packed = np.packbits(Xb, axis=0)  # for efficiency in comparison: (ceil(n_samples/8), n_cols)
 
@@ -258,6 +311,9 @@ class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
             raise ValueError('Shape of input is different from what was seen'
                              'in `fit`')
 
+        if len(self.thresholds_) == 0:
+            return np.zeros((X.shape[0], 0), dtype=float)
+
         return np.concatenate([np.atleast_2d(X[:, j] <= thresh).T for j, thresh in self.thresholds_], axis=1).astype(float)
     
     def __threshold(self, estimator, feature):
@@ -273,8 +329,11 @@ class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
         Iteratively removes the least important feature until the score of the model
         decreases. Returns the remaining thresholds.
         """
-        # Check is fit had ben called
+        # Check is fit had been called
         check_is_fitted(self, ['n_features_in_', 'feature_names_in_'])
+
+        if len(thresholds) == 0:
+            return thresholds
         
         # Fit the model on the thresholded data
         # clf.fit(X, y)
@@ -335,4 +394,3 @@ class ThresholdGuessBinarizer(BaseEstimator, TransformerMixin):
                 ret[j].append(i)        
                 
         return ret
-        

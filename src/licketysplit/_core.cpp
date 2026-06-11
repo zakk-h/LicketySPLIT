@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <limits>
 
 #include "licketysplit.cpp"
 
@@ -54,7 +55,7 @@ static std::vector<double> numpy_to_vec_f64(
     py::array_t<double, py::array::c_style | py::array::forcecast> v
 ) {
     py::buffer_info info = v.request();
-    if (info.ndim != 1) throw std::runtime_error("sample_weights must be 1D");
+    if (info.ndim != 1) throw std::runtime_error("array must be 1D");
 
     const int n = static_cast<int>(info.shape[0]);
     const auto* p = static_cast<const double*>(info.ptr);
@@ -68,8 +69,14 @@ static py::array_t<int> vec_i32_to_numpy(const std::vector<int>& v) {
     return out;
 }
 
+static py::array_t<double> vec_f64_to_numpy(const std::vector<double>& v) {
+    py::array_t<double> out((py::ssize_t)v.size());
+    std::memcpy(out.mutable_data(), v.data(), v.size() * sizeof(double));
+    return out;
+}
+
 PYBIND11_MODULE(_core, m) {
-    m.doc() = "Bindings for LicketySPLIT (row-major binary X, multiclass y/bb_pred, optional sample weights)";
+    m.doc() = "Bindings for LicketySPLIT (row-major binary X, classification/regression deferral, optional sample weights)";
 
     py::enum_<LicketySPLIT::CacheMode>(m, "CacheMode")
         .value("HASH_FINGERPRINT", LicketySPLIT::CacheMode::HASH_FINGERPRINT)
@@ -167,6 +174,77 @@ PYBIND11_MODULE(_core, m) {
         )
 
         .def(
+            "fit_regression",
+            [](LicketySPLIT& self,
+               py::array_t<uint8_t, py::array::c_style | py::array::forcecast> X,
+               py::array_t<double,  py::array::c_style | py::array::forcecast> y,
+               py::array_t<double,  py::array::c_style | py::array::forcecast> bb_pred,
+               double lambda_leaf,
+               double eta_defer,
+               int depth_budget,
+               py::object sample_weights_obj)
+            {
+                py::buffer_info xinfo = X.request();
+                py::buffer_info yinfo = y.request();
+                py::buffer_info binfo = bb_pred.request();
+
+                if (xinfo.ndim != 2) throw std::runtime_error("X must be 2D (n_samples, n_features)");
+                if (yinfo.ndim != 1) throw std::runtime_error("y must be 1D (n_samples,)");
+                if (binfo.ndim != 1) throw std::runtime_error("bb_pred must be 1D (n_samples,)");
+
+                const int n_samples = static_cast<int>(xinfo.shape[0]);
+
+                if ((int)yinfo.shape[0] != n_samples) {
+                    throw std::runtime_error("y length must match X rows");
+                }
+                if ((int)binfo.shape[0] != n_samples) {
+                    throw std::runtime_error("bb_pred length must match X rows");
+                }
+
+                if (depth_budget < -128 || depth_budget > 127) {
+                    throw std::runtime_error("depth_budget out of int8 range [-128,127]");
+                }
+
+                auto X_row_major = numpy_to_rowmajor_u8(X);
+                auto y_vec       = numpy_to_vec_f64(y);
+                auto bb_vec      = numpy_to_vec_f64(bb_pred);
+
+                std::vector<double> weights_vec;
+                if (!sample_weights_obj.is_none()) {
+                    auto weights_arr =
+                        py::cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(sample_weights_obj);
+
+                    py::buffer_info winfo = weights_arr.request();
+                    if (winfo.ndim != 1) throw std::runtime_error("sample_weights must be 1D");
+                    if ((int)winfo.shape[0] != n_samples) {
+                        throw std::runtime_error("sample_weights length must match X rows");
+                    }
+
+                    weights_vec = numpy_to_vec_f64(weights_arr);
+                }
+
+                self.fit_regression(
+                    X_row_major,
+                    y_vec,
+                    bb_vec,
+                    lambda_leaf,
+                    eta_defer,
+                    (int8_t)depth_budget,
+                    weights_vec
+                );
+
+                return self.last_objective();
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("bb_pred"),
+            py::arg("lambda_leaf"),
+            py::arg("eta_defer"),
+            py::arg("depth_budget"),
+            py::arg("sample_weights") = py::none()
+        )
+
+        .def(
             "predict",
             [](const LicketySPLIT& self,
                py::array_t<uint8_t, py::array::c_style | py::array::forcecast> X,
@@ -213,6 +291,55 @@ PYBIND11_MODULE(_core, m) {
             },
             py::arg("X"),
             py::arg("placeholder") = 99
+        )
+
+        .def(
+            "predict_regression",
+            [](const LicketySPLIT& self,
+               py::array_t<uint8_t, py::array::c_style | py::array::forcecast> X,
+               py::array_t<double,  py::array::c_style | py::array::forcecast> bb_pred,
+               double placeholder)
+            {
+                py::buffer_info xinfo = X.request();
+                py::buffer_info binfo = bb_pred.request();
+
+                if (xinfo.ndim != 2) throw std::runtime_error("X must be 2D (n_samples, n_features)");
+                if (binfo.ndim != 1) throw std::runtime_error("bb_pred must be 1D (n_samples,)");
+
+                const int n_samples = static_cast<int>(xinfo.shape[0]);
+                if ((int)binfo.shape[0] != n_samples) {
+                    throw std::runtime_error("bb_pred length must match X rows");
+                }
+
+                auto X_row_major = numpy_to_rowmajor_u8(X);
+                auto bb_vec      = numpy_to_vec_f64(bb_pred);
+
+                auto preds = self.predict_regression(X_row_major, bb_vec, placeholder);
+                return vec_f64_to_numpy(preds);
+            },
+            py::arg("X"),
+            py::arg("bb_pred"),
+            py::arg("placeholder") = std::numeric_limits<double>::quiet_NaN()
+        )
+
+        .def(
+            "predict_regression_placeholder",
+            [](const LicketySPLIT& self,
+               py::array_t<uint8_t, py::array::c_style | py::array::forcecast> X,
+               double placeholder)
+            {
+                py::buffer_info xinfo = X.request();
+                if (xinfo.ndim != 2) throw std::runtime_error("X must be 2D (n_samples, n_features)");
+
+                auto X_row_major = numpy_to_rowmajor_u8(X);
+
+                std::vector<double> empty_bb;
+                auto preds = self.predict_regression(X_row_major, empty_bb, placeholder);
+
+                return vec_f64_to_numpy(preds);
+            },
+            py::arg("X"),
+            py::arg("placeholder") = std::numeric_limits<double>::quiet_NaN()
         )
 
         .def("last_objective", &LicketySPLIT::last_objective)
@@ -265,6 +392,13 @@ PYBIND11_MODULE(_core, m) {
             "leaf_paths_and_actions_single_tree",
             [](const LicketySPLIT& self) {
                 return self.leaf_paths_and_actions_single_tree();
+            }
+        )
+
+        .def(
+            "regression_leaf_paths_and_values_single_tree",
+            [](const LicketySPLIT& self) {
+                return self.regression_leaf_paths_and_values_single_tree();
             }
         );
 }
