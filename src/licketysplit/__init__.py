@@ -229,11 +229,75 @@ class LicketySPLITClassifier(_BaseLicketySPLIT, ClassifierMixin):
         self.n_classes_ = int(len(self.classes_))
         self.eta_defer_used_ = float(eta_arg)
 
+        self._compute_leaf_proba_(X, y, sample_weight)
+
         return self
 
     def fit_return(self, *args, **kwargs):
         self.fit(*args, **kwargs)
         return float(self.objective_)
+
+    def _leaf_ids_from_paths(self, X) -> np.ndarray:
+        # return the index of the leaf path reached by each row of X.
+        X = _as_u8_X(X)
+        n = int(X.shape[0])
+
+        paths, _ = self.get_tree_paths()
+        leaf_ids = np.full(n, -1, dtype=np.int32)
+
+        for leaf_id, path in enumerate(paths):
+            mask = np.ones(n, dtype=bool)
+
+            for signed_f in path:
+                f = abs(int(signed_f)) - 1
+
+                if signed_f > 0:
+                    mask &= (X[:, f] == 0)
+                else:
+                    mask &= (X[:, f] != 0)
+
+            leaf_ids[mask] = int(leaf_id)
+
+        if np.any(leaf_ids < 0):
+            raise RuntimeError("Some samples did not match any leaf path.")
+
+        return leaf_ids
+
+    def _compute_leaf_proba_(self, X, y, sample_weight=None):
+        # compute empirical class proportions in each fitted leaf.
+        leaf_ids = self._leaf_ids_from_paths(X)
+        n_leaves = int(leaf_ids.max()) + 1 if leaf_ids.size else 0
+        n_classes = int(self.n_classes_)
+
+        counts = np.zeros((n_leaves, n_classes), dtype=np.float64)
+
+        if sample_weight is None:
+            for leaf_id, yi in zip(leaf_ids, y):
+                counts[int(leaf_id), int(yi)] += 1.0
+        else:
+            w = _as_f64_weights(sample_weight, int(X.shape[0]))
+            for leaf_id, yi, wi in zip(leaf_ids, y, w):
+                counts[int(leaf_id), int(yi)] += float(wi)
+
+        totals = counts.sum(axis=1, keepdims=True)
+
+        # Should not happen for fitted leaves, but safe fallback.
+        zero = totals[:, 0] <= 0.0
+        totals[zero, 0] = 1.0
+
+        proba = counts / totals
+
+        # If a zero-support leaf somehow exists, use the global class distribution.
+        if np.any(zero):
+            global_counts = counts.sum(axis=0)
+            global_total = float(global_counts.sum())
+            if global_total > 0.0:
+                proba[zero, :] = global_counts / global_total
+            else:
+                proba[zero, :] = 1.0 / float(n_classes)
+
+        self.leaf_proba_ = proba
+        return self
 
     def predict(self, X, *, bb_pred=None) -> np.ndarray:
         X = _as_u8_X(X)
@@ -254,6 +318,20 @@ class LicketySPLITClassifier(_BaseLicketySPLIT, ClassifierMixin):
     def predict_placeholder(self, X, placeholder=99) -> np.ndarray:
         X = _as_u8_X(X)
         return np.asarray(self._model.predict_placeholder(X, int(placeholder)), dtype=np.int32)
+
+    def predict_proba(self, X) -> np.ndarray:
+        # return empirical class probabilities for the leaf reached by each row.
+        # (n_samples, n_classes) ordered according to self.classes_.
+        X = _as_u8_X(X)
+
+        if not hasattr(self, "_model"):
+            raise RuntimeError("Model has not been fit.")
+
+        if not hasattr(self, "leaf_proba_"):
+            raise RuntimeError("Leaf probabilities have not been computed.")
+
+        leaf_ids = self._leaf_ids_from_paths(X)
+        return np.asarray(self.leaf_proba_[leaf_ids], dtype=np.float64)
 
     def score(self, X, y, sample_weight=None):
         X = _as_u8_X(X)
