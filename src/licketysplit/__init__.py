@@ -159,7 +159,7 @@ class _BaseLicketySPLIT(BaseEstimator):
         return np.asarray(self._model.split_counts_single_tree(X), dtype=np.int32)
 
 
-class LicketySPLITClassifier(_BaseLicketySPLIT, ClassifierMixin):
+class LicketySPLITClassifier(ClassifierMixin, _BaseLicketySPLIT):
     def __init__(
         self,
         *,
@@ -614,7 +614,7 @@ class LicketySPLITClassifier(_BaseLicketySPLIT, ClassifierMixin):
         return ax
 
 
-class LicketySPLITRegressor(_BaseLicketySPLIT, RegressorMixin):
+class LicketySPLITRegressor(RegressorMixin, _BaseLicketySPLIT):
     def __init__(
         self,
         *,
