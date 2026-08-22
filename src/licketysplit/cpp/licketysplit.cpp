@@ -239,7 +239,8 @@ public:
         }
 
         const double root_tss = [&](){ double sy = 0.0, sy2 = 0.0; for (int i = 0; i < n_samples; ++i) { const double w = uniform_weights_fast_ ? uniform_weight_ : sample_weights_[(size_t)i]; sy += w * y[(size_t)i]; sy2 += w * y[(size_t)i] * y[(size_t)i]; } return std::max(0.0, sy2 - sy * sy / std::max(1e-12, total_weight_)); }();
-        lamN = lambda_leaf * root_tss;
+        // lamN = lambda_leaf * root_tss;
+        lamN = lambda_leaf * total_weight_;
         eta = eta_defer;
         depth_trained = depth_budget;
         k_trained     = lookahead_k;
