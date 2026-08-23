@@ -252,9 +252,9 @@ class LicketySPLITClassifier(ClassifierMixin, _BaseLicketySPLIT):
                 f = abs(int(signed_f)) - 1
 
                 if signed_f > 0:
-                    mask &= (X[:, f] == 0)
-                else:
                     mask &= (X[:, f] != 0)
+                else:
+                    mask &= (X[:, f] == 0)
 
             leaf_ids[mask] = int(leaf_id)
 
